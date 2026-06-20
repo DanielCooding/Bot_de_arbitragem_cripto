@@ -1,43 +1,39 @@
 export const runtime = 'nodejs';
 
 import { NextRequest } from 'next/server';
-import { fetchAllTicks } from '@/lib/wsManager';
+import { startFetchLoop, getCachedTicks } from '@/lib/wsManager';
 import { detectOpportunities } from '@/lib/arbitrage';
+
+// Inicia o loop de fetch assim que a rota é carregada
+startFetchLoop();
 
 export async function GET(req: NextRequest) {
   const threshold = parseFloat(req.nextUrl.searchParams.get('threshold') ?? '0.05');
 
   const stream = new ReadableStream({
-    async start(controller) {
-      let active = true;
+    start(controller) {
+      function send() {
+        const ticks        = getCachedTicks();
+        const opportunities = detectOpportunities(ticks, threshold);
+        const payload = JSON.stringify({
+          ticks,
+          opportunities,
+          fetchedAt:  Date.now(),
+          source:     ticks.length > 0 ? 'live' : 'aguardando',
+          tickCount:  ticks.length,
+        });
+        try { controller.enqueue(`data: ${payload}\n\n`); }
+        catch { clearInterval(iv); }
+      }
+
+      // Envia o estado atual imediatamente e depois a cada 1s
+      send();
+      const iv = setInterval(send, 1000);
 
       req.signal.addEventListener('abort', () => {
-        active = false;
+        clearInterval(iv);
         try { controller.close(); } catch { /* noop */ }
       });
-
-      while (active) {
-        try {
-          const ticks        = await fetchAllTicks();
-          const opportunities = detectOpportunities(ticks, threshold);
-
-          const payload = JSON.stringify({
-            ticks,
-            opportunities,
-            fetchedAt: Date.now(),
-            source: 'rest-parallel',
-            tickCount: ticks.length,
-          });
-
-          if (!active) break;
-          controller.enqueue(`data: ${payload}\n\n`);
-        } catch (err) {
-          console.error('[stream] erro:', err);
-        }
-
-        // Aguarda 2s entre cada ciclo de fetch
-        await new Promise((r) => setTimeout(r, 2000));
-      }
     },
   });
 
