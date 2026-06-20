@@ -1,7 +1,6 @@
 /**
- * WebSocket Manager — usa o WebSocket NATIVO do Node.js 22+.
- * Não depende do pacote 'ws', evitando conflitos com o webpack do Next.js.
- * Deve rodar apenas no Node.js runtime (nunca no Edge).
+ * Price fetcher — busca bid/ask reais das 3 exchanges em paralelo.
+ * Compatível com Next.js 14 + webpack sem dependências externas.
  */
 
 export interface BookTick {
@@ -12,178 +11,97 @@ export interface BookTick {
   updatedAt: number;
 }
 
-// Singleton global — persiste entre hot-reloads do Next.js
-declare global {
-  // eslint-disable-next-line no-var
-  var __wsState: Map<string, BookTick> | undefined;
-  // eslint-disable-next-line no-var
-  var __wsInitialized: boolean | undefined;
-}
+export async function fetchAllTicks(): Promise<BookTick[]> {
+  const results = await Promise.allSettled([
+    fetchBinance(),
+    fetchKuCoin(),
+    fetchKraken(),
+  ]);
 
-if (!global.__wsState) global.__wsState = new Map();
-const state = global.__wsState;
-
-function setTick(t: BookTick) {
-  state.set(`${t.exchange}:${t.symbol}`, t);
-}
-
-export function getLatestTicks(): BookTick[] {
-  return Array.from(state.values()).filter(
-    (t) => Date.now() - t.updatedAt < 30_000
-  );
-}
-
-// ─── Helper: abre WS nativo com reconexão automática ───────────────────
-type MsgHandler = (data: string) => void;
-
-function openWS(
-  label: string,
-  url: string,
-  onOpen: (ws: WebSocket) => void,
-  onMsg:  MsgHandler,
-  retryMs = 3000
-) {
-  let ws: WebSocket;
-
-  function connect() {
-    ws = new WebSocket(url);
-
-    ws.addEventListener('open', () => {
-      console.log(`[WS] ${label} conectado`);
-      onOpen(ws);
-    });
-
-    ws.addEventListener('message', (ev) => {
-      try { onMsg(typeof ev.data === 'string' ? ev.data : ev.data.toString()); }
-      catch { /* noop */ }
-    });
-
-    ws.addEventListener('error', (ev) => {
-      console.error(`[WS] ${label} erro:`, (ev as ErrorEvent).message ?? ev);
-    });
-
-    ws.addEventListener('close', () => {
-      console.log(`[WS] ${label} fechado — reconectando em ${retryMs}ms...`);
-      setTimeout(connect, retryMs);
-    });
-  }
-
-  connect();
+  return results
+    .filter((r): r is PromiseFulfilledResult<BookTick[]> => r.status === 'fulfilled')
+    .flatMap((r) => r.value);
 }
 
 // ─── Binance ─────────────────────────────────────────────────────────────────
-const BINANCE_SYMS = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt'];
+// GET /api/v3/ticker/bookTicker?symbols=["BTCUSDT",...]
+// Retorna melhor bid e ask para cada par
 
-function connectBinance() {
-  const streams = BINANCE_SYMS.map((s) => `${s}@bookTicker`).join('/');
-  openWS(
-    'Binance',
-    `wss://stream.binance.com:9443/stream?streams=${streams}`,
-    () => { /* nada a enviar no open */ },
-    (data) => {
-      const msg = JSON.parse(data);
-      const d   = msg.data;
-      if (!d?.s) return;
-      setTick({ exchange: 'Binance', symbol: d.s, bid: parseFloat(d.b), ask: parseFloat(d.a), updatedAt: Date.now() });
-    }
+const BINANCE_SYMS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'];
+
+async function fetchBinance(): Promise<BookTick[]> {
+  const syms = JSON.stringify(BINANCE_SYMS);
+  const res  = await fetch(
+    `https://api.binance.com/api/v3/ticker/bookTicker?symbols=${encodeURIComponent(syms)}`,
+    { next: { revalidate: 0 }, signal: AbortSignal.timeout(4000) }
   );
+  const data = await res.json() as { symbol: string; bidPrice: string; askPrice: string }[];
+  const now  = Date.now();
+  return data.map((d) => ({
+    exchange:  'Binance',
+    symbol:    d.symbol,
+    bid:       parseFloat(d.bidPrice),
+    ask:       parseFloat(d.askPrice),
+    updatedAt: now,
+  }));
 }
 
-// ─── KuCoin ────────────────────────────────────────────────────────────────────
-const KUCOIN_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'];
+// ─── KuCoin ──────────────────────────────────────────────────────────────────
+// GET /api/v1/market/allTickers — retorna bid/ask de todos os pares
 
-async function connectKuCoin() {
-  try {
-    const res  = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
-    const json = await res.json() as { data: { token: string; instanceServers: { endpoint: string; pingInterval: number }[] } };
-    const { token, instanceServers } = json.data;
-    const { endpoint, pingInterval } = instanceServers[0];
-    const wsUrl = `${endpoint}?token=${token}&connectId=arbot${Date.now()}`;
+const KUCOIN_PAIRS = new Set(['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT']);
 
-    let pingTimer: ReturnType<typeof setInterval>;
-
-    openWS(
-      'KuCoin',
-      wsUrl,
-      (ws) => {
-        // Subscreve o book ticker (level1)
-        ws.send(JSON.stringify({
-          id: Date.now(),
-          type: 'subscribe',
-          topic: `/spotMarket/level1:${KUCOIN_PAIRS.join(',')}`,
-          privateChannel: false,
-          response: true,
-        }));
-
-        // KuCoin exige heartbeat manual
-        pingTimer = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
-          }
-        }, pingInterval - 2000);
-      },
-      (data) => {
-        const msg = JSON.parse(data) as {
-          type: string;
-          topic?: string;
-          data?: { bestBid: string; bestAsk: string };
-        };
-        if (msg.type !== 'message' || !msg.data?.bestAsk) return;
-        const rawSym = (msg.topic ?? '').split(':')[1]; // "BTC-USDT"
-        if (!rawSym) return;
-        setTick({
-          exchange:  'KuCoin',
-          symbol:    rawSym.replace('-', ''),
-          bid:       parseFloat(msg.data.bestBid),
-          ask:       parseFloat(msg.data.bestAsk),
-          updatedAt: Date.now(),
-        });
-      },
-      5000
-    );
-
-    // Limpa o ping quando a conexão morrer (o openWS já reconecta)
-    // Reconexão pega novo token automaticamente
-    setTimeout(() => { clearInterval(pingTimer); connectKuCoin(); }, (pingInterval * 10));
-
-  } catch (err) {
-    console.error('[WS] KuCoin token error:', err);
-    setTimeout(connectKuCoin, 5000);
-  }
-}
-
-// ─── Kraken ────────────────────────────────────────────────────────────────────
-const KRAKEN_SYMS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT'];
-
-function connectKraken() {
-  openWS(
-    'Kraken',
-    'wss://ws.kraken.com/v2',
-    (ws) => {
-      ws.send(JSON.stringify({
-        method: 'subscribe',
-        params: { channel: 'ticker', symbol: KRAKEN_SYMS },
-      }));
-    },
-    (data) => {
-      const msg = JSON.parse(data) as {
-        channel: string;
-        data?: { symbol: string; bid: number; ask: number }[];
-      };
-      if (msg.channel !== 'ticker' || !Array.isArray(msg.data)) return;
-      for (const d of msg.data) {
-        setTick({ exchange: 'Kraken', symbol: d.symbol.replace('/', ''), bid: d.bid, ask: d.ask, updatedAt: Date.now() });
-      }
-    }
+async function fetchKuCoin(): Promise<BookTick[]> {
+  const res  = await fetch(
+    'https://api.kucoin.com/api/v1/market/allTickers',
+    { next: { revalidate: 0 }, signal: AbortSignal.timeout(4000) }
   );
+  const json = await res.json() as {
+    data: { ticker: { symbol: string; bestBid: string; bestAsk: string }[] }
+  };
+  const now = Date.now();
+  return json.data.ticker
+    .filter((t) => KUCOIN_PAIRS.has(t.symbol))
+    .map((t) => ({
+      exchange:  'KuCoin',
+      symbol:    t.symbol.replace('-', ''),
+      bid:       parseFloat(t.bestBid),
+      ask:       parseFloat(t.bestAsk),
+      updatedAt: now,
+    }))
+    .filter((t) => t.bid > 0 && t.ask > 0);
 }
 
-// ─── Bootstrap ────────────────────────────────────────────────────────────
-export function initWebSockets() {
-  if (global.__wsInitialized) return;
-  global.__wsInitialized = true;
-  console.log('[WS] Iniciando conexões WebSocket nativas...');
-  connectBinance();
-  connectKuCoin();
-  connectKraken();
+// ─── Kraken ──────────────────────────────────────────────────────────────────
+// GET /0/public/Ticker?pair=XBTUSDT,ETHUSDT,...
+// Kraken usa XBT em vez de BTC
+
+const KRAKEN_PAIRS   = 'XBTUSDT,ETHUSDT,SOLUSDT,XRPUSDT';
+const KRAKEN_SYM_MAP: Record<string, string> = {
+  XBTUSDT: 'BTCUSDT',
+  ETHUSDT: 'ETHUSDT',
+  SOLUSDT: 'SOLUSDT',
+  XRPUSDT: 'XRPUSDT',
+};
+
+async function fetchKraken(): Promise<BookTick[]> {
+  const res  = await fetch(
+    `https://api.kraken.com/0/public/Ticker?pair=${KRAKEN_PAIRS}`,
+    { next: { revalidate: 0 }, signal: AbortSignal.timeout(4000) }
+  );
+  const json = await res.json() as {
+    result: Record<string, { b: [string]; a: [string] }>
+  };
+  const now = Date.now();
+  return Object.entries(json.result).map(([krakenSym, d]) => ({
+    exchange:  'Kraken',
+    symbol:    KRAKEN_SYM_MAP[krakenSym] ?? krakenSym,
+    bid:       parseFloat(d.b[0]),
+    ask:       parseFloat(d.a[0]),
+    updatedAt: now,
+  }));
 }
+
+// Mantém compatibilidade com imports antigos
+export function getLatestTicks(): BookTick[] { return []; }
+export function initWebSockets(): void {}

@@ -1,16 +1,23 @@
 export const runtime = 'nodejs';
 
-import { initWebSockets, getLatestTicks } from '@/lib/wsManager';
-
-initWebSockets();
+import { fetchAllTicks } from '@/lib/wsManager';
 
 export async function GET() {
-  const ticks = getLatestTicks();
+  try {
+    const ticks = await fetchAllTicks();
+    const byExchange = ticks.reduce<Record<string, number>>((acc, t) => {
+      acc[t.exchange] = (acc[t.exchange] ?? 0) + 1;
+      return acc;
+    }, {});
 
-  return Response.json({
-    wsInitialized: global.__wsInitialized ?? false,
-    ticksInMemory: ticks.length,
-    ticks,
-    now: Date.now(),
-  }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({
+      ok: true,
+      totalTicks: ticks.length,
+      byExchange,
+      sample: ticks.slice(0, 6),
+      fetchedAt: Date.now(),
+    });
+  } catch (err) {
+    return Response.json({ ok: false, error: String(err) }, { status: 500 });
+  }
 }
