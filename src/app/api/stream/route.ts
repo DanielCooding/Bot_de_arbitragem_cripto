@@ -1,8 +1,10 @@
+// IMPORTANTE: força Node.js runtime — o pacote 'ws' não funciona no Edge Runtime
+export const runtime = 'nodejs';
+
 import { NextRequest } from 'next/server';
 import { initWebSockets, getLatestTicks } from '@/lib/wsManager';
 import { detectOpportunities } from '@/lib/arbitrage';
 
-// Garante que os WebSockets estão ativos
 initWebSockets();
 
 export async function GET(req: NextRequest) {
@@ -11,7 +13,7 @@ export async function GET(req: NextRequest) {
   const stream = new ReadableStream({
     start(controller) {
       function push() {
-        const ticks = getLatestTicks();
+        const ticks        = getLatestTicks();
         const opportunities = detectOpportunities(ticks, threshold);
 
         const payload = JSON.stringify({
@@ -19,6 +21,7 @@ export async function GET(req: NextRequest) {
           opportunities,
           fetchedAt: Date.now(),
           source: 'websocket',
+          tickCount: ticks.length,
         });
 
         try {
@@ -28,7 +31,6 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // Envia imediatamente e depois a cada 1s (WebSocket já tem dados frescos)
       push();
       const interval = setInterval(push, 1000);
 
@@ -42,8 +44,9 @@ export async function GET(req: NextRequest) {
   return new Response(stream, {
     headers: {
       'Content-Type':  'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-cache, no-transform',
       'Connection':    'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }
