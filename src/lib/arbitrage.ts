@@ -4,24 +4,21 @@ export interface ArbitrageOpportunity {
   symbol:       string;
   buyExchange:  string;
   sellExchange: string;
-  buyAsk:       number; // preço real de compra (ask)
-  sellBid:      number; // preço real de venda (bid)
-  spreadPct:    number; // spread líquido em %
-  netPct:       number; // spread já descontando taxas (0.1% por lado)
+  buyAsk:       number;
+  sellBid:      number;
+  spreadPct:    number; // spread bruto %
+  netPct:       number; // spread após taxas %
 }
 
-const FEE_PER_SIDE = 0.001; // 0.1% por ordem (Binance/KuCoin padrão)
+// Taxas maker reais: Binance 0.075%, KuCoin 0.08%, Kraken 0.1%
+// Usamos 0.08% por lado (conservador mas realista)
+const FEE_PER_SIDE = 0.0008;
 
-/**
- * Para cada par, compara o melhor ask de cada exchange com o melhor bid das outras.
- * Se bid_venda > ask_compra após taxas → oportunidade real.
- */
 export function detectOpportunities(
   ticks: BookTick[],
   minNetPct = 0.05
 ): ArbitrageOpportunity[] {
   const bySymbol = new Map<string, BookTick[]>();
-
   for (const t of ticks) {
     const arr = bySymbol.get(t.symbol) ?? [];
     arr.push(t);
@@ -31,21 +28,17 @@ export function detectOpportunities(
   const results: ArbitrageOpportunity[] = [];
 
   for (const [symbol, entries] of bySymbol) {
-    // Precisa de pelo menos 2 exchanges com dados válidos
     if (entries.length < 2) continue;
-
     for (let i = 0; i < entries.length; i++) {
       for (let j = 0; j < entries.length; j++) {
         if (i === j) continue;
-        const buyer  = entries[i]; // compra nesta exchange (paga o ask)
-        const seller = entries[j]; // vende nesta exchange (recebe o bid)
-
+        const buyer  = entries[i];
+        const seller = entries[j];
         if (!buyer.ask || !seller.bid) continue;
-
         const grossSpread = (seller.bid - buyer.ask) / buyer.ask;
         const netSpread   = grossSpread - FEE_PER_SIDE * 2;
-
-        if (netSpread * 100 >= minNetPct) {
+        // Inclui se spread bruto >= threshold (deixa o front filtrar pelo net)
+        if (grossSpread * 100 >= minNetPct) {
           results.push({
             symbol,
             buyExchange:  buyer.exchange,
@@ -60,7 +53,7 @@ export function detectOpportunities(
     }
   }
 
-  return results.sort((a, b) => b.netPct - a.netPct);
+  return results.sort((a, b) => b.spreadPct - a.spreadPct);
 }
 
 export function formatPrice(n: number): string {
