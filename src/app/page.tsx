@@ -10,7 +10,12 @@ import StatusBar from '@/components/StatusBar';
 import { ArbitrageOpportunity } from '@/lib/arbitrage';
 import { BookTick } from '@/lib/wsManager';
 
-interface SpreadHistory { timestamp: number; spreadPct: number; symbol: string; }
+interface SpreadHistory {
+  timestamp:   number;
+  spreadPct:   number;
+  symbol:      string;
+  isOpportunity: boolean;
+}
 interface Alert { id: string; symbol: string; spreadPct: number; netPct: number; buyExchange: string; sellExchange: string; timestamp: number; seen: boolean; }
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'];
@@ -28,7 +33,7 @@ export default function Dashboard() {
   const [activeChart, setActiveChart] = useState('BTCUSDT');
   const [isLive, setIsLive] = useState(false);
 
-  const esRef = useRef<EventSource | null>(null);
+  const esRef      = useRef<EventSource | null>(null);
   const alertedRef = useRef<Set<string>>(new Set());
 
   const connect = useCallback(() => {
@@ -37,29 +42,42 @@ export default function Dashboard() {
     setIsLive(false);
     const es = new EventSource(`/api/stream?threshold=${threshold}`);
     esRef.current = es;
-    es.onopen = () => setConnected(true);
+    es.onopen  = () => setConnected(true);
     es.onerror = () => { setConnected(false); setIsLive(false); };
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
         if (data.error) return;
-        const ticks = data.ticks ?? [];
+        const ticks: BookTick[] = data.ticks ?? [];
         setTicks(ticks);
         setOpportunities(data.opportunities ?? []);
         setLastUpdate(data.fetchedAt);
         setTickCount(ticks.length);
-        // Live = temos ticks reais de pelo menos 2 exchanges
-        const exchanges = new Set(ticks.map((t: BookTick) => t.exchange));
+        const exchanges = new Set(ticks.map(t => t.exchange));
         setIsLive(exchanges.size >= 2);
-        const newHistory: SpreadHistory[] = (data.opportunities ?? []).map(
-          (op: ArbitrageOpportunity) => ({ timestamp: data.fetchedAt, spreadPct: op.spreadPct, symbol: op.symbol })
+
+        const now = data.fetchedAt as number;
+
+        // Adiciona spreads brutos ao histórico (para o gráfico sempre popular)
+        const rawEntries: SpreadHistory[] = (data.rawSpreads ?? []).map(
+          (s: { symbol: string; spreadPct: number }) => ({
+            timestamp: now, spreadPct: s.spreadPct, symbol: s.symbol, isOpportunity: false,
+          })
         );
-        setHistory((prev) => [...prev, ...newHistory].slice(-MAX_HISTORY * SYMBOLS.length));
+        // Sobrescreve com oportunidades reais (isOpportunity=true)
+        const oppEntries: SpreadHistory[] = (data.opportunities ?? []).map(
+          (op: ArbitrageOpportunity) => ({
+            timestamp: now, spreadPct: op.spreadPct, symbol: op.symbol, isOpportunity: true,
+          })
+        );
+        const newEntries = oppEntries.length > 0 ? oppEntries : rawEntries;
+        setHistory(prev => [...prev, ...newEntries].slice(-MAX_HISTORY * SYMBOLS.length));
+
         for (const op of (data.opportunities ?? []) as ArbitrageOpportunity[]) {
-          const k = `${op.symbol}-${Math.floor(data.fetchedAt / 15000)}`;
+          const k = `${op.symbol}-${Math.floor(now / 15000)}`;
           if (!alertedRef.current.has(k)) {
             alertedRef.current.add(k);
-            setAlerts((prev) => [{ id: k, symbol: op.symbol, spreadPct: op.spreadPct, netPct: op.netPct, buyExchange: op.buyExchange, sellExchange: op.sellExchange, timestamp: data.fetchedAt, seen: false }, ...prev].slice(0, 20));
+            setAlerts(prev => [{ id: k, symbol: op.symbol, spreadPct: op.spreadPct, netPct: op.netPct, buyExchange: op.buyExchange, sellExchange: op.sellExchange, timestamp: now, seen: false }, ...prev].slice(0, 20));
           }
         }
       } catch { /* noop */ }
@@ -69,13 +87,15 @@ export default function Dashboard() {
   useEffect(() => { connect(); return () => esRef.current?.close(); }, [connect]);
 
   function dismissAlert(id: string) {
-    setAlerts((prev) => prev.map((a) => a.id === id ? { ...a, seen: true } : a));
+    setAlerts(prev => prev.map(a => a.id === id ? { ...a, seen: true } : a));
   }
 
   const btcBid = ticks.find(t => t.symbol === 'BTCUSDT' && t.exchange === 'Binance');
   const ethBid = ticks.find(t => t.symbol === 'ETHUSDT' && t.exchange === 'Binance');
   const solBid = ticks.find(t => t.symbol === 'SOLUSDT' && t.exchange === 'Binance');
   const xrpBid = ticks.find(t => t.symbol === 'XRPUSDT' && t.exchange === 'Binance');
+
+  const exchangeCount = new Set(ticks.map(t => t.exchange)).size || 3;
 
   return (
     <main style={{ minHeight: '100vh', background: 'var(--bnb-bg)' }}>
@@ -102,7 +122,6 @@ export default function Dashboard() {
               )}
             </div>
           ))}
-          {/* Indicador de status — verde quando temos dados reais de 2+ exchanges */}
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--bnb-muted)', flexShrink: 0 }}>
             <span style={{
               width: 6, height: 6, borderRadius: '50%',
@@ -110,14 +129,12 @@ export default function Dashboard() {
               display: 'inline-block',
               boxShadow: isLive ? '0 0 6px var(--bnb-green)' : 'none',
             }} />
-            {isLive ? 'Live' : connected ? 'aguardando dados...' : 'conectando...'}
+            {isLive ? 'Live' : connected ? 'aguardando...' : 'conectando...'}
           </div>
         </div>
       </div>
 
       <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-        {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div>
             <h1 style={{ fontSize: 18, fontWeight: 700, color: 'var(--bnb-text)' }}>Monitor de Arbitragem</h1>
@@ -133,10 +150,9 @@ export default function Dashboard() {
 
         <AlertBanner alerts={alerts} onDismiss={dismissAlert} />
 
-        {/* KPIs */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
           {[
-            { label: 'Exchanges',      value: String(new Set(ticks.map(t=>t.exchange)).size || 3), sub: 'Binance · KuCoin · Kraken' },
+            { label: 'Exchanges',      value: String(exchangeCount),                                sub: 'Binance · KuCoin · Kraken' },
             { label: 'Pares',          value: String(SYMBOLS.length),                               sub: 'BTC · ETH · SOL · XRP' },
             { label: 'Oportunidades',  value: String(opportunities.length),                         sub: `net spread > ${threshold}%` },
             { label: 'Alertas ativos', value: String(alerts.filter(a=>!a.seen).length),              sub: 'não visualizados' },
@@ -149,7 +165,6 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* Tabela */}
         <div>
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--bnb-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             Oportunidades · bid/ask reais · spread líquido após taxas
@@ -157,7 +172,6 @@ export default function Dashboard() {
           <PriceTable opportunities={opportunities} ticks={ticks} />
         </div>
 
-        {/* Gráfico */}
         <div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--bnb-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Histórico de Spread</span>
