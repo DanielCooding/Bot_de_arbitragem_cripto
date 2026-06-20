@@ -1,11 +1,11 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 
 interface SpreadPoint {
-  timestamp:     number;
-  spreadPct:     number;
-  symbol:        string;
+  timestamp:      number;
+  spreadPct:      number;
+  symbol:         string;
   isOpportunity?: boolean;
 }
 
@@ -16,100 +16,195 @@ interface Props {
 }
 
 export default function SpreadChart({ history, symbol, threshold }: Props) {
-  const points = useMemo(
-    () => history.filter(h => h.symbol === symbol).slice(-60),
-    [history, symbol]
-  );
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const rafRef     = useRef<number>(0);
+  const pointsRef  = useRef<SpreadPoint[]>([]);
 
-  if (points.length === 0) {
-    return (
-      <div style={{ background: 'var(--bnb-surface)', border: '1px solid var(--bnb-border)', borderRadius: 4, padding: '40px 20px', textAlign: 'center', color: 'var(--bnb-faint)', fontSize: 13 }}>
-        Aguardando dados do spread entre exchanges...
-      </div>
-    );
-  }
+  // Atualiza a ref dos pontos sempre que history/symbol muda
+  useEffect(() => {
+    pointsRef.current = history
+      .filter(h => h.symbol === symbol)
+      .slice(-120);
+  }, [history, symbol]);
 
-  const maxVal  = Math.max(...points.map(p => p.spreadPct), threshold * 2, 0.02);
-  const minVal  = 0;
-  const range   = maxVal - minVal || 0.01;
-  const W = 900, H = 180, PL = 52, PR = 16, PT = 12, PB = 32;
-  const chartW  = W - PL - PR;
-  const chartH  = H - PT - PB;
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-  function toX(i: number) { return PL + (i / Math.max(points.length - 1, 1)) * chartW; }
-  function toY(v: number) { return PT + (1 - (v - minVal) / range) * chartH; }
+    // Ajusta resolução para DPI do monitor
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+      canvas.width  = rect.width  * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+    }
 
-  const linePath = points
-    .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.spreadPct).toFixed(1)}`)
-    .join(' ');
+    const W = rect.width;
+    const H = rect.height;
+    const PL = 56, PR = 20, PT = 16, PB = 28;
+    const cW = W - PL - PR;
+    const cH = H - PT - PB;
 
-  const areaPath = linePath + ` L${toX(points.length-1).toFixed(1)},${(PT+chartH).toFixed(1)} L${PL},${(PT+chartH).toFixed(1)} Z`;
+    ctx.clearRect(0, 0, W, H);
 
-  const thresholdY = toY(threshold);
+    const pts = pointsRef.current;
 
-  // Ticks do eixo Y
-  const yTicks = [0, maxVal * 0.25, maxVal * 0.5, maxVal * 0.75, maxVal];
+    if (pts.length < 2) {
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.font = '13px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Aguardando dados...', W / 2, H / 2);
+      rafRef.current = requestAnimationFrame(draw);
+      return;
+    }
+
+    const maxVal = Math.max(...pts.map(p => p.spreadPct), threshold * 1.5, 0.005);
+    const minVal = 0;
+    const range  = maxVal - minVal || 0.001;
+
+    const toX = (i: number) => PL + (i / (pts.length - 1)) * cW;
+    const toY = (v: number) => PT + (1 - (v - minVal) / range) * cH;
+
+    // ----- fundo -----
+    ctx.fillStyle = '#1C2030';
+    ctx.beginPath();
+    ctx.roundRect(0, 0, W, H, 6);
+    ctx.fill();
+
+    // ----- grid horizontal -----
+    const yTicks = 5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= yTicks; i++) {
+      const v = minVal + (i / yTicks) * range;
+      const y = toY(v);
+      ctx.beginPath();
+      ctx.moveTo(PL, y);
+      ctx.lineTo(W - PR, y);
+      ctx.stroke();
+      ctx.fillText(v.toFixed(4) + '%', PL - 4, y + 3);
+    }
+
+    // ----- eixo X (tempo) -----
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.textAlign = 'center';
+    ctx.font = '9px monospace';
+    const xStep = Math.max(1, Math.floor(pts.length / 6));
+    for (let i = 0; i < pts.length; i += xStep) {
+      const x = toX(i);
+      const t = new Date(pts[i].timestamp);
+      ctx.fillText(`${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}:${t.getSeconds().toString().padStart(2,'0')}`, x, H - 6);
+    }
+
+    // ----- linha do threshold -----
+    const thY = toY(threshold);
+    if (thY >= PT && thY <= PT + cH) {
+      ctx.strokeStyle = 'rgba(240,185,11,0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(PL, thY);
+      ctx.lineTo(W - PR, thY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(240,185,11,0.5)';
+      ctx.textAlign = 'left';
+      ctx.font = '9px monospace';
+      ctx.fillText(`min ${threshold}%`, W - PR + 2, thY + 3);
+    }
+
+    // ----- área preenchida -----
+    const grad = ctx.createLinearGradient(0, PT, 0, PT + cH);
+    grad.addColorStop(0,   'rgba(240,185,11,0.20)');
+    grad.addColorStop(1,   'rgba(240,185,11,0.01)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(toX(0), toY(pts[0].spreadPct));
+    for (let i = 1; i < pts.length; i++) {
+      // curva suave com bezier
+      const x0 = toX(i - 1), y0 = toY(pts[i-1].spreadPct);
+      const x1 = toX(i),     y1 = toY(pts[i].spreadPct);
+      const cpX = (x0 + x1) / 2;
+      ctx.bezierCurveTo(cpX, y0, cpX, y1, x1, y1);
+    }
+    ctx.lineTo(toX(pts.length - 1), PT + cH);
+    ctx.lineTo(PL, PT + cH);
+    ctx.closePath();
+    ctx.fill();
+
+    // ----- linha principal -----
+    ctx.strokeStyle = '#F0B90B';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = 'rgba(240,185,11,0.4)';
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.moveTo(toX(0), toY(pts[0].spreadPct));
+    for (let i = 1; i < pts.length; i++) {
+      const x0 = toX(i - 1), y0 = toY(pts[i-1].spreadPct);
+      const x1 = toX(i),     y1 = toY(pts[i].spreadPct);
+      const cpX = (x0 + x1) / 2;
+      ctx.bezierCurveTo(cpX, y0, cpX, y1, x1, y1);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // ----- pontos de oportunidade -----
+    pts.forEach((p, i) => {
+      if (!p.isOpportunity) return;
+      ctx.beginPath();
+      ctx.arc(toX(i), toY(p.spreadPct), 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#F0B90B';
+      ctx.fill();
+      ctx.strokeStyle = '#0B0E11';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+
+    // ----- ponto atual (pulsante via opacidade) -----
+    const last = pts[pts.length - 1];
+    const lx = toX(pts.length - 1);
+    const ly = toY(last.spreadPct);
+    const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+    ctx.beginPath();
+    ctx.arc(lx, ly, 4 + pulse * 2, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(240,185,11,${0.15 + pulse * 0.1})`;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lx, ly, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#F0B90B';
+    ctx.fill();
+
+    // ----- label do valor atual -----
+    ctx.fillStyle = '#F0B90B';
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'left';
+    const label = last.spreadPct.toFixed(5) + '%';
+    const lxLabel = lx + 8 > W - PR - 70 ? lx - 75 : lx + 8;
+    ctx.fillText(label, lxLabel, ly + 4);
+
+    rafRef.current = requestAnimationFrame(draw);
+  }, [threshold]);
+
+  useEffect(() => {
+    rafRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [draw]);
 
   return (
-    <div style={{ background: 'var(--bnb-surface)', border: '1px solid var(--bnb-border)', borderRadius: 4, padding: '12px 8px 8px', overflow: 'hidden' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"  stopColor="#F0B90B" stopOpacity="0.25" />
-            <stop offset="100%" stopColor="#F0B90B" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-
-        {/* Grid Y */}
-        {yTicks.map((v, i) => {
-          const y = toY(v);
-          return (
-            <g key={i}>
-              <line x1={PL} y1={y} x2={W - PR} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-              <text x={PL - 4} y={y + 4} textAnchor="end" fontSize="9" fill="rgba(255,255,255,0.35)">
-                {v.toFixed(3)}%
-              </text>
-            </g>
-          );
-        })}
-
-        {/* Linha do threshold */}
-        {thresholdY >= PT && thresholdY <= PT + chartH && (
-          <>
-            <line x1={PL} y1={thresholdY} x2={W-PR} y2={thresholdY} stroke="rgba(240,185,11,0.4)" strokeWidth="1" strokeDasharray="4,3" />
-            <text x={W-PR+2} y={thresholdY+4} fontSize="8" fill="rgba(240,185,11,0.6)">min</text>
-          </>
-        )}
-
-        {/* Área preenchida */}
-        <path d={areaPath} fill="url(#areaGrad)" />
-
-        {/* Linha principal */}
-        <path d={linePath} fill="none" stroke="#F0B90B" strokeWidth="1.5" strokeLinejoin="round" />
-
-        {/* Pontos de oportunidade */}
-        {points.filter(p => p.isOpportunity).map((p, i) => {
-          const idx = points.indexOf(p);
-          return (
-            <circle key={i} cx={toX(idx)} cy={toY(p.spreadPct)} r="3" fill="#F0B90B" />
-          );
-        })}
-
-        {/* Último valor */}
-        {points.length > 0 && (() => {
-          const last = points[points.length - 1];
-          const x = toX(points.length - 1);
-          const y = toY(last.spreadPct);
-          return (
-            <>
-              <circle cx={x} cy={y} r="3" fill="#F0B90B" />
-              <text x={x + 5} y={y + 4} fontSize="9" fill="#F0B90B">{last.spreadPct.toFixed(4)}%</text>
-            </>
-          );
-        })()}
-      </svg>
-      <div style={{ fontSize: 10, color: 'var(--bnb-faint)', textAlign: 'center', marginTop: 4 }}>
-        Spread bruto entre exchanges · últimos {points.length} pontos · threshold: {threshold}%
+    <div style={{ background: 'var(--bnb-surface)', border: '1px solid var(--bnb-border)', borderRadius: 4, padding: 0, overflow: 'hidden' }}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: '100%', height: '200px', display: 'block' }}
+      />
+      <div style={{ fontSize: 10, color: 'var(--bnb-faint)', textAlign: 'center', padding: '4px 0 6px' }}>
+        Spread bruto entre exchanges · atualiza a cada segundo · threshold: {threshold}%
       </div>
     </div>
   );
