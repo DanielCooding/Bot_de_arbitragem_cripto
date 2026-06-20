@@ -1,9 +1,8 @@
 /**
- * WebSocket Manager — DEVE rodar apenas no Node.js runtime (não Edge).
- * Mantém conexões persistentes com Binance, KuCoin e Kraken.
+ * WebSocket Manager — usa o WebSocket NATIVO do Node.js 22+.
+ * Não depende do pacote 'ws', evitando conflitos com o webpack do Next.js.
+ * Deve rodar apenas no Node.js runtime (nunca no Edge).
  */
-
-import { WebSocket } from 'ws';
 
 export interface BookTick {
   exchange:  string;
@@ -13,10 +12,10 @@ export interface BookTick {
   updatedAt: number;
 }
 
-// Singleton global — sobrevive ao hot-reload do Next.js
+// Singleton global — persiste entre hot-reloads do Next.js
 declare global {
   // eslint-disable-next-line no-var
-  var __wsState:       Map<string, BookTick> | undefined;
+  var __wsState: Map<string, BookTick> | undefined;
   // eslint-disable-next-line no-var
   var __wsInitialized: boolean | undefined;
 }
@@ -34,149 +33,156 @@ export function getLatestTicks(): BookTick[] {
   );
 }
 
-// ─── Binance (único stream combinado com vários pares) ──────────────────
-const BINANCE_SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt'];
+// ─── Helper: abre WS nativo com reconexão automática ───────────────────
+type MsgHandler = (data: string) => void;
+
+function openWS(
+  label: string,
+  url: string,
+  onOpen: (ws: WebSocket) => void,
+  onMsg:  MsgHandler,
+  retryMs = 3000
+) {
+  let ws: WebSocket;
+
+  function connect() {
+    ws = new WebSocket(url);
+
+    ws.addEventListener('open', () => {
+      console.log(`[WS] ${label} conectado`);
+      onOpen(ws);
+    });
+
+    ws.addEventListener('message', (ev) => {
+      try { onMsg(typeof ev.data === 'string' ? ev.data : ev.data.toString()); }
+      catch { /* noop */ }
+    });
+
+    ws.addEventListener('error', (ev) => {
+      console.error(`[WS] ${label} erro:`, (ev as ErrorEvent).message ?? ev);
+    });
+
+    ws.addEventListener('close', () => {
+      console.log(`[WS] ${label} fechado — reconectando em ${retryMs}ms...`);
+      setTimeout(connect, retryMs);
+    });
+  }
+
+  connect();
+}
+
+// ─── Binance ─────────────────────────────────────────────────────────────────
+const BINANCE_SYMS = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt'];
 
 function connectBinance() {
-  const streams = BINANCE_SYMBOLS.map((s) => `${s}@bookTicker`).join('/');
-  const ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
-
-  ws.on('open', () => console.log('[WS] Binance conectado'));
-  ws.on('error', (err) => console.error('[WS] Binance erro:', err.message));
-  ws.on('close', () => {
-    console.log('[WS] Binance fechado, reconectando em 3s...');
-    setTimeout(connectBinance, 3000);
-  });
-
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      const d = msg.data;
+  const streams = BINANCE_SYMS.map((s) => `${s}@bookTicker`).join('/');
+  openWS(
+    'Binance',
+    `wss://stream.binance.com:9443/stream?streams=${streams}`,
+    () => { /* nada a enviar no open */ },
+    (data) => {
+      const msg = JSON.parse(data);
+      const d   = msg.data;
       if (!d?.s) return;
-      setTick({
-        exchange:  'Binance',
-        symbol:    d.s,
-        bid:       parseFloat(d.b),
-        ask:       parseFloat(d.a),
-        updatedAt: Date.now(),
-      });
-    } catch { /* noop */ }
-  });
+      setTick({ exchange: 'Binance', symbol: d.s, bid: parseFloat(d.b), ask: parseFloat(d.a), updatedAt: Date.now() });
+    }
+  );
 }
 
-// ─── KuCoin (requer token público antes de conectar) ─────────────────
+// ─── KuCoin ────────────────────────────────────────────────────────────────────
 const KUCOIN_PAIRS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'];
-
-function kuToStd(sym: string) {
-  return sym.replace('-', '');
-}
 
 async function connectKuCoin() {
   try {
     const res  = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
-    const json = await res.json() as { data: { token: string; instanceServers: { endpoint: string }[] } };
+    const json = await res.json() as { data: { token: string; instanceServers: { endpoint: string; pingInterval: number }[] } };
     const { token, instanceServers } = json.data;
-    const url = `${instanceServers[0].endpoint}?token=${token}&connectId=arbot${Date.now()}`;
+    const { endpoint, pingInterval } = instanceServers[0];
+    const wsUrl = `${endpoint}?token=${token}&connectId=arbot${Date.now()}`;
 
-    const ws = new WebSocket(url);
+    let pingTimer: ReturnType<typeof setInterval>;
 
-    ws.on('open', () => {
-      console.log('[WS] KuCoin conectado');
-      ws.send(JSON.stringify({
-        id: Date.now(),
-        type: 'subscribe',
-        topic: `/spotMarket/level1:${KUCOIN_PAIRS.join(',')}`,
-        privateChannel: false,
-        response: true,
-      }));
-    });
+    openWS(
+      'KuCoin',
+      wsUrl,
+      (ws) => {
+        // Subscreve o book ticker (level1)
+        ws.send(JSON.stringify({
+          id: Date.now(),
+          type: 'subscribe',
+          topic: `/spotMarket/level1:${KUCOIN_PAIRS.join(',')}`,
+          privateChannel: false,
+          response: true,
+        }));
 
-    ws.on('error', (err) => console.error('[WS] KuCoin erro:', err.message));
-    ws.on('close', () => {
-      console.log('[WS] KuCoin fechado, reconectando em 5s...');
-      setTimeout(connectKuCoin, 5000);
-    });
-
-    ws.on('message', (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString()) as {
-          type: string; id?: string;
+        // KuCoin exige heartbeat manual
+        pingTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
+          }
+        }, pingInterval - 2000);
+      },
+      (data) => {
+        const msg = JSON.parse(data) as {
+          type: string;
           topic?: string;
           data?: { bestBid: string; bestAsk: string };
         };
-
-        if (msg.type === 'ping') {
-          ws.send(JSON.stringify({ id: msg.id, type: 'pong' }));
-          return;
-        }
         if (msg.type !== 'message' || !msg.data?.bestAsk) return;
-
-        // topic = "/spotMarket/level1:BTC-USDT"
         const rawSym = (msg.topic ?? '').split(':')[1]; // "BTC-USDT"
         if (!rawSym) return;
-
         setTick({
           exchange:  'KuCoin',
-          symbol:    kuToStd(rawSym), // "BTCUSDT"
+          symbol:    rawSym.replace('-', ''),
           bid:       parseFloat(msg.data.bestBid),
           ask:       parseFloat(msg.data.bestAsk),
           updatedAt: Date.now(),
         });
-      } catch { /* noop */ }
-    });
+      },
+      5000
+    );
+
+    // Limpa o ping quando a conexão morrer (o openWS já reconecta)
+    // Reconexão pega novo token automaticamente
+    setTimeout(() => { clearInterval(pingTimer); connectKuCoin(); }, (pingInterval * 10));
+
   } catch (err) {
     console.error('[WS] KuCoin token error:', err);
     setTimeout(connectKuCoin, 5000);
   }
 }
 
-// ─── Kraken (v2 API) ─────────────────────────────────────────────────
-const KRAKEN_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT'];
-
-function krToStd(sym: string) { return sym.replace('/', ''); }
+// ─── Kraken ────────────────────────────────────────────────────────────────────
+const KRAKEN_SYMS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT'];
 
 function connectKraken() {
-  const ws = new WebSocket('wss://ws.kraken.com/v2');
-
-  ws.on('open', () => {
-    console.log('[WS] Kraken conectado');
-    ws.send(JSON.stringify({
-      method: 'subscribe',
-      params: { channel: 'ticker', symbol: KRAKEN_SYMBOLS },
-    }));
-  });
-
-  ws.on('error', (err) => console.error('[WS] Kraken erro:', err.message));
-  ws.on('close', () => {
-    console.log('[WS] Kraken fechado, reconectando em 3s...');
-    setTimeout(connectKraken, 3000);
-  });
-
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString()) as {
+  openWS(
+    'Kraken',
+    'wss://ws.kraken.com/v2',
+    (ws) => {
+      ws.send(JSON.stringify({
+        method: 'subscribe',
+        params: { channel: 'ticker', symbol: KRAKEN_SYMS },
+      }));
+    },
+    (data) => {
+      const msg = JSON.parse(data) as {
         channel: string;
-        data: { symbol: string; bid: number; ask: number }[];
+        data?: { symbol: string; bid: number; ask: number }[];
       };
       if (msg.channel !== 'ticker' || !Array.isArray(msg.data)) return;
       for (const d of msg.data) {
-        setTick({
-          exchange:  'Kraken',
-          symbol:    krToStd(d.symbol),
-          bid:       d.bid,
-          ask:       d.ask,
-          updatedAt: Date.now(),
-        });
+        setTick({ exchange: 'Kraken', symbol: d.symbol.replace('/', ''), bid: d.bid, ask: d.ask, updatedAt: Date.now() });
       }
-    } catch { /* noop */ }
-  });
+    }
+  );
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────
 export function initWebSockets() {
   if (global.__wsInitialized) return;
   global.__wsInitialized = true;
-  console.log('[WS] Iniciando conexões WebSocket...');
+  console.log('[WS] Iniciando conexões WebSocket nativas...');
   connectBinance();
   connectKuCoin();
   connectKraken();
