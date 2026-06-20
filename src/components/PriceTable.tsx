@@ -2,79 +2,105 @@
 
 import { ArbitrageOpportunity, PriceTick } from '@/types';
 import { formatPrice, formatSpread } from '@/lib/arbitrage';
-import { TrendingUp } from 'lucide-react';
 
 interface Props {
   opportunities: ArbitrageOpportunity[];
   ticks: PriceTick[];
 }
 
-const EXCHANGE_COLORS: Record<string, string> = {
-  Binance: 'text-yellow-400',
-  KuCoin: 'text-green-400',
-  Kraken: 'text-purple-400',
+const EXCHANGE_BADGE: Record<string, { bg: string; color: string }> = {
+  Binance: { bg: 'rgba(240,185,11,0.12)', color: '#F0B90B' },
+  KuCoin:  { bg: 'rgba(3,166,109,0.12)',  color: '#03A66D' },
+  Kraken:  { bg: 'rgba(122,89,255,0.12)', color: '#7A59FF' },
 };
 
-function SpreadBadge({ pct }: { pct: number }) {
-  const color =
-    pct >= 1 ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-    : pct >= 0.5 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40'
-    : 'bg-slate-700/60 text-slate-300 border-slate-600';
+function ExchangeBadge({ name }: { name: string }) {
+  const s = EXCHANGE_BADGE[name] ?? { bg: 'rgba(255,255,255,0.08)', color: '#EAECEF' };
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-semibold ${color}`}>
-      <TrendingUp size={10} />
+    <span
+      style={{
+        background: s.bg,
+        color: s.color,
+        padding: '2px 8px',
+        borderRadius: 3,
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: '0.3px',
+      }}
+    >
+      {name}
+    </span>
+  );
+}
+
+function SpreadCell({ pct }: { pct: number }) {
+  const color = pct >= 1 ? 'var(--bnb-green)' : pct >= 0.5 ? 'var(--bnb-yellow)' : 'var(--bnb-text)';
+  return (
+    <span style={{ color, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
       {formatSpread(pct)}
     </span>
   );
 }
 
-export default function PriceTable({ opportunities, ticks }: Props) {
-  if (opportunities.length === 0) {
-    return (
-      <div className="bg-slate-800/60 border border-slate-700 rounded-2xl p-8 text-center">
-        <p className="text-slate-400 text-sm">Nenhuma oportunidade acima do threshold no momento.</p>
-      </div>
-    );
-  }
-
+export default function PriceTable({ opportunities }: Props) {
   return (
-    <div className="bg-slate-800/60 border border-slate-700 rounded-2xl overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-slate-700">
-              <th className="text-left px-5 py-3 text-slate-400 font-medium">Par</th>
-              <th className="text-left px-5 py-3 text-slate-400 font-medium">Comprar em</th>
-              <th className="text-right px-5 py-3 text-slate-400 font-medium">Preço Compra</th>
-              <th className="text-left px-5 py-3 text-slate-400 font-medium">Vender em</th>
-              <th className="text-right px-5 py-3 text-slate-400 font-medium">Preço Venda</th>
-              <th className="text-right px-5 py-3 text-slate-400 font-medium">Spread</th>
-            </tr>
-          </thead>
-          <tbody>
-            {opportunities.map((op) => (
-              <tr key={op.symbol} className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors">
-                <td className="px-5 py-4 font-semibold text-white">{op.symbol}</td>
-                <td className={`px-5 py-4 font-medium ${EXCHANGE_COLORS[op.buyExchange] ?? 'text-slate-300'}`}>
-                  {op.buyExchange}
-                </td>
-                <td className="px-5 py-4 text-right text-slate-300 tabular-nums">
-                  ${formatPrice(op.buyPrice)}
-                </td>
-                <td className={`px-5 py-4 font-medium ${EXCHANGE_COLORS[op.sellExchange] ?? 'text-slate-300'}`}>
-                  {op.sellExchange}
-                </td>
-                <td className="px-5 py-4 text-right text-slate-300 tabular-nums">
-                  ${formatPrice(op.sellPrice)}
-                </td>
-                <td className="px-5 py-4 text-right">
-                  <SpreadBadge pct={op.spreadPct} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div style={{ background: 'var(--bnb-surface)', border: '1px solid var(--bnb-border)', borderRadius: 4, overflow: 'hidden' }}>
+      {/* Table header */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr 1fr',
+          padding: '8px 16px',
+          borderBottom: '1px solid var(--bnb-border)',
+          fontSize: 11,
+          color: 'var(--bnb-muted)',
+          fontWeight: 500,
+          textTransform: 'uppercase',
+          letterSpacing: '0.5px',
+        }}
+      >
+        <span>Par</span>
+        <span>Comprar em</span>
+        <span style={{ textAlign: 'right' }}>Preço Compra</span>
+        <span>Vender em</span>
+        <span style={{ textAlign: 'right' }}>Preço Venda</span>
+        <span style={{ textAlign: 'right' }}>Spread</span>
       </div>
+
+      {opportunities.length === 0 ? (
+        <div style={{ padding: '32px 16px', textAlign: 'center', color: 'var(--bnb-muted)', fontSize: 12 }}>
+          Nenhuma oportunidade acima do threshold no momento.
+        </div>
+      ) : (
+        opportunities.map((op, i) => (
+          <div
+            key={op.symbol}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr 1fr',
+              padding: '10px 16px',
+              borderBottom: i < opportunities.length - 1 ? '1px solid var(--bnb-border)' : 'none',
+              alignItems: 'center',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bnb-surface2)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+          >
+            <span style={{ fontWeight: 700, color: 'var(--bnb-text)', fontSize: 13 }}>{op.symbol}</span>
+            <ExchangeBadge name={op.buyExchange} />
+            <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--bnb-green)' }}>
+              ${formatPrice(op.buyPrice)}
+            </span>
+            <ExchangeBadge name={op.sellExchange} />
+            <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--bnb-red)' }}>
+              ${formatPrice(op.sellPrice)}
+            </span>
+            <span style={{ textAlign: 'right' }}>
+              <SpreadCell pct={op.spreadPct} />
+            </span>
+          </div>
+        ))
+      )}
     </div>
   );
 }
