@@ -26,26 +26,31 @@ export default function Dashboard() {
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const [tickCount, setTickCount] = useState(0);
   const [activeChart, setActiveChart] = useState('BTCUSDT');
-  const [source, setSource] = useState<string>('—');
+  const [isLive, setIsLive] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
   const alertedRef = useRef<Set<string>>(new Set());
 
   const connect = useCallback(() => {
     if (esRef.current) esRef.current.close();
+    setConnected(false);
+    setIsLive(false);
     const es = new EventSource(`/api/stream?threshold=${threshold}`);
     esRef.current = es;
     es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
+    es.onerror = () => { setConnected(false); setIsLive(false); };
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
         if (data.error) return;
-        setTicks(data.ticks ?? []);
+        const ticks = data.ticks ?? [];
+        setTicks(ticks);
         setOpportunities(data.opportunities ?? []);
         setLastUpdate(data.fetchedAt);
-        setSource(data.source ?? '—');
-        setTickCount(data.ticks?.length ?? 0);
+        setTickCount(ticks.length);
+        // Live = temos ticks reais de pelo menos 2 exchanges
+        const exchanges = new Set(ticks.map((t: BookTick) => t.exchange));
+        setIsLive(exchanges.size >= 2);
         const newHistory: SpreadHistory[] = (data.opportunities ?? []).map(
           (op: ArbitrageOpportunity) => ({ timestamp: data.fetchedAt, spreadPct: op.spreadPct, symbol: op.symbol })
         );
@@ -97,9 +102,15 @@ export default function Dashboard() {
               )}
             </div>
           ))}
+          {/* Indicador de status — verde quando temos dados reais de 2+ exchanges */}
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--bnb-muted)', flexShrink: 0 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: source === 'websocket' ? 'var(--bnb-green)' : 'var(--bnb-red)', display: 'inline-block' }} />
-            {source === 'websocket' ? 'WebSocket ativo' : 'conectando...'}
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: isLive ? 'var(--bnb-green)' : 'var(--bnb-red)',
+              display: 'inline-block',
+              boxShadow: isLive ? '0 0 6px var(--bnb-green)' : 'none',
+            }} />
+            {isLive ? 'Live' : connected ? 'aguardando dados...' : 'conectando...'}
           </div>
         </div>
       </div>
@@ -125,10 +136,10 @@ export default function Dashboard() {
         {/* KPIs */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
           {[
-            { label: 'Exchanges',      value: '3',                                     sub: 'Binance · KuCoin · Kraken' },
-            { label: 'Pares',          value: String(SYMBOLS.length),                  sub: 'BTC · ETH · SOL · XRP' },
-            { label: 'Oportunidades',  value: String(opportunities.length),            sub: `net spread > ${threshold}%` },
-            { label: 'Alertas ativos', value: String(alerts.filter(a=>!a.seen).length), sub: 'não visualizados' },
+            { label: 'Exchanges',      value: String(new Set(ticks.map(t=>t.exchange)).size || 3), sub: 'Binance · KuCoin · Kraken' },
+            { label: 'Pares',          value: String(SYMBOLS.length),                               sub: 'BTC · ETH · SOL · XRP' },
+            { label: 'Oportunidades',  value: String(opportunities.length),                         sub: `net spread > ${threshold}%` },
+            { label: 'Alertas ativos', value: String(alerts.filter(a=>!a.seen).length),              sub: 'não visualizados' },
           ].map((kpi) => (
             <div key={kpi.label} style={{ background: 'var(--bnb-surface)', border: '1px solid var(--bnb-border)', borderRadius: 4, padding: '14px 16px' }}>
               <div style={{ fontSize: 11, color: 'var(--bnb-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{kpi.label}</div>
