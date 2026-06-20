@@ -1,53 +1,36 @@
-import { fetchBinancePrices } from '@/lib/binance';
-import { fetchKuCoinPrices } from '@/lib/kucoin';
-import { fetchKrakenPrices } from '@/lib/kraken';
+import { NextRequest } from 'next/server';
+import { initWebSockets, getLatestTicks } from '@/lib/wsManager';
 import { detectOpportunities } from '@/lib/arbitrage';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+// Garante que os WebSockets estão ativos
+initWebSockets();
 
-/**
- * Server-Sent Events — envia atualizações de preço a cada 5 segundos.
- */
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const threshold = parseFloat(searchParams.get('threshold') ?? '0.3');
-
-  const encoder = new TextEncoder();
+export async function GET(req: NextRequest) {
+  const threshold = parseFloat(req.nextUrl.searchParams.get('threshold') ?? '0.05');
 
   const stream = new ReadableStream({
-    async start(controller) {
-      const send = (data: unknown) => {
+    start(controller) {
+      function push() {
+        const ticks = getLatestTicks();
+        const opportunities = detectOpportunities(ticks, threshold);
+
+        const payload = JSON.stringify({
+          ticks,
+          opportunities,
+          fetchedAt: Date.now(),
+          source: 'websocket',
+        });
+
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          controller.enqueue(`data: ${payload}\n\n`);
         } catch {
-          // cliente desconectou
+          clearInterval(interval);
         }
-      };
+      }
 
-      const tick = async () => {
-        try {
-          const [binance, kucoin, kraken] = await Promise.allSettled([
-            fetchBinancePrices(),
-            fetchKuCoinPrices(),
-            fetchKrakenPrices(),
-          ]);
-
-          const ticks = [
-            ...(binance.status === 'fulfilled' ? binance.value : []),
-            ...(kucoin.status === 'fulfilled' ? kucoin.value : []),
-            ...(kraken.status === 'fulfilled' ? kraken.value : []),
-          ];
-
-          const opportunities = detectOpportunities(ticks, threshold);
-          send({ ticks, opportunities, fetchedAt: Date.now() });
-        } catch (err) {
-          send({ error: err instanceof Error ? err.message : 'Erro' });
-        }
-      };
-
-      await tick();
-      const interval = setInterval(tick, 5000);
+      // Envia imediatamente e depois a cada 1s (WebSocket já tem dados frescos)
+      push();
+      const interval = setInterval(push, 1000);
 
       req.signal.addEventListener('abort', () => {
         clearInterval(interval);
@@ -58,9 +41,9 @@ export async function GET(req: Request) {
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream',
+      'Content-Type':  'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      'Connection':    'keep-alive',
     },
   });
 }
